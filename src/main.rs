@@ -2,9 +2,9 @@
 extern crate rocket;
 use lazy_static::lazy_static;
 use rocket::{
-    http::ContentType,
+    http::{ContentType, Status},
     request::{FromParam, Request},
-    response::{self, Responder, Response},
+    response::{self, status::NotFound, Responder, Response},
     Build, Rocket,
 };
 use std::collections::HashMap;
@@ -25,11 +25,12 @@ struct User {
 }
 impl<'r> Responder<'r, 'r> for &'r User {
     fn respond_to(self, _: &'r Request<'_>) -> response::Result<'r> {
+        let base_response = default_response();
         let user = format!("Found user: {:?}", self);
         Response::build()
             .sized_body(user.len(), Cursor::new(user))
             .raw_header("X-USER-ID", self.uuid.to_string())
-            .header(ContentType::Plain)
+            .merge(base_response)
             .ok()
     }
 }
@@ -58,6 +59,7 @@ impl<'r> FromParam<'r> for NameGrade<'r> {
 struct NewUser<'a>(Vec<&'a User>);
 impl<'r> Responder<'r, 'r> for NewUser<'r> {
     fn respond_to(self, _: &'r Request<'_>) -> response::Result<'r> {
+        let base_response = default_response();
         let user = self
             .0
             .iter()
@@ -67,6 +69,7 @@ impl<'r> Responder<'r, 'r> for NewUser<'r> {
         Response::build()
             .sized_body(user.len(), Cursor::new(user))
             .header(ContentType::Plain)
+            .join(base_response)
             .ok()
     }
 }
@@ -87,16 +90,24 @@ lazy_static! {
     };
 }
 
-#[get("/user/<uuid>", rank = 1, format = "text/plain")]
-fn user(uuid: &str) -> String {
-    let user = USERS.get(uuid);
-    match user {
-        Some(u) => format!("Found user: {:?}", u),
-        None => String::from("User not found"),
-    }
+fn default_response<'r>() -> response::Response<'r> {
+    Response::build()
+        .header(ContentType::Plain)
+        .raw_header("X-CUSTOM-ID", "CUSTOM")
+        .finalize()
 }
+
+#[get("/user/<uuid>", rank = 1, format = "text/plain")]
+// fn user(uuid: &str) -> Result<&User, NotFound<&str>> {
+//     let user = USERS.get(uuid);
+//     user.ok_or(NotFound("User not found"))
+// }
+fn user(uuid: &str) -> Option<&User> {
+    USERS.get(uuid)
+}
+
 #[get("/users/<name_grade>?<filters..>")]
-fn users(name_grade: NameGrade, filters: Option<Filters>) -> String {
+fn users(name_grade: NameGrade, filters: Option<Filters>) -> Result<NewUser, Status> {
     let users: Vec<&User> = USERS
         .values()
         .filter(|user| user.name.contains(&name_grade.name) && user.grade == name_grade.grade)
@@ -108,18 +119,33 @@ fn users(name_grade: NameGrade, filters: Option<Filters>) -> String {
             }
         })
         .collect();
-    if users.len() > 0 {
-        users
-            .iter()
-            .map(|u| u.name.to_string())
-            .collect::<Vec<String>>()
-            .join(",")
+    // if users.len() > 0 {
+    //     Some(NewUser(users))
+    // } else {
+    //     None
+    // }
+
+    if users.is_empty() {
+        Err(Status::Forbidden)
     } else {
-        String::from("No user found")
+        Ok(NewUser(users))
     }
+}
+
+// Default catcher
+#[catch(404)]
+fn not_found(req: &Request) -> String {
+    format!("We cannot find this page {}.", req.uri())
+}
+
+#[catch(403)]
+fn forbidden(req: &Request) -> String {
+    format!("Access forbidden {}.", req.uri())
 }
 
 #[launch]
 fn rocket() -> Rocket<Build> {
-    rocket::build().mount("/", routes![user, users])
+    rocket::build()
+        .mount("/", routes![user, users])
+        .register("/", catchers![not_found, forbidden])
 }
